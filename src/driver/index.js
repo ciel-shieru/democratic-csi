@@ -1331,6 +1331,11 @@ class CsiBaseDriver {
             break;
 
           case "hostpath":
+            // driver-specific pre-stage hook (default no-op); local-hostpath with xfs.enabled uses it for XFS assertion + project-quota re-apply
+            if (typeof driver.beforeHostpathStage === "function") {
+              await driver.beforeHostpathStage(volume_context, volume_id);
+            }
+
             result = await mount.pathIsMounted(staging_target_path);
             // if not mounted, mount
             if (!result) {

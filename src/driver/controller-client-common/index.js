@@ -127,6 +127,9 @@ class ControllerClientCommonDriver extends CsiBaseDriver {
         });
       }, 30 * 1000);
     }
+
+    // Tracks in-progress xfs-reflink snapshots (for logging/monitoring).
+    this.snapshotsInProgress = new Set();
   }
 
   getAccessModes(capability) {
@@ -539,6 +542,33 @@ class ControllerClientCommonDriver extends CsiBaseDriver {
   }
 
   /**
+   * Lifecycle hooks for driver subclasses to override.
+   * Called at key points in CreateVolume and DeleteVolume so that
+   * XFS-specific logic (quota management, assertion checks) can be
+   * injected without duplicating the full CreateVolume/DeleteVolume flow.
+   */
+
+  /**
+   * Called after a volume directory has been created or cloned from source.
+   * Subclasses may override to set per-volume project quotas or run XFS assertions.
+   * @param {string} volumePath - absolute path of the newly-created/cloned volume directory
+   * @param {number|string} capacityBytes - requested capacity in bytes (from CSI CreateVolume request)
+   * @param {boolean} hasSource - whether this volume was created from a content source (snapshot/clone)
+   */
+  async afterVolumeDirCreated(volumePath, capacityBytes, hasSource) {
+    // Default: no-op. ControllerLocalHostpathDriver overrides when xfs.enabled to set quota + assertXfs.
+  }
+
+  /**
+   * Called before a volume directory is deleted.
+   * Subclasses may override to clear per-volume project quotas or run cleanup logic.
+   * @param {string} volumePath - absolute path of the volume directory being removed
+   */
+  async beforeVolumeDirDeleted(volumePath) {
+    // Default: no-op. ControllerLocalHostpathDriver overrides when xfs.enabled to call clearProjectQuota.
+  }
+
+  /**
    * Create a volume doing in essence the following:
    * 1. create directory
    *
@@ -733,6 +763,37 @@ class ControllerClientCommonDriver extends CsiBaseDriver {
                 await kopia.snapshotRestore(options);
               }
               break;
+            case "xfs-reflink":
+              {
+                source_path = driver.getControllerSnapshotPath(snapshot_id);
+
+                if (!(await driver.directoryExists(source_path))) {
+                  throw new GrpcError(
+                    grpc.status.NOT_FOUND,
+                    `invalid volume_content_source path: ${source_path}`
+                  );
+                }
+
+                // Assert same filesystem before reflink copy
+                if (driver.xfsClient) {
+                  await driver.xfsClient.assertSameFilesystem(
+                    source_path,
+                    volume_path
+                  );
+                  await driver.xfsClient.reflinkCopy(source_path, volume_path);
+                } else {
+                  throw new GrpcError(
+                    grpc.status.FAILED_PRECONDITION,
+                    "xfs-reflink requires xfsClient to be configured"
+                  );
+                }
+
+                driver.ctx.logger.debug(
+                  "controller volume source path (xfs-reflink): %s",
+                  source_path
+                );
+              }
+              break;
             default:
               throw new GrpcError(
                 grpc.status.INVALID_ARGUMENT,
@@ -805,6 +866,9 @@ class ControllerClientCommonDriver extends CsiBaseDriver {
       }
     }
 
+    // --- Hook: afterVolumeDirCreated ---
+    await driver.afterVolumeDirCreated(volume_path, capacity_bytes, !!volume_content_source);
+
     let volume_context = driver.getVolumeContext(volume_id);
 
     volume_context["provisioner_driver"] = driver.options.driver;
@@ -864,6 +928,10 @@ class ControllerClientCommonDriver extends CsiBaseDriver {
     }
 
     const volume_path = driver.getControllerVolumePath(volume_id);
+
+    // --- Hook: beforeVolumeDirDeleted ---
+    await driver.beforeVolumeDirDeleted(volume_path);
+
     await driver.deleteDir(volume_path);
 
     return {};
@@ -1270,6 +1338,73 @@ class ControllerClientCommonDriver extends CsiBaseDriver {
           }
         }
         break;
+      case "xfs-reflink":
+        {
+          snapshot_id = `${source_volume_id}-${name}`;
+
+          const snapshot_path = driver.getControllerSnapshotPath(snapshot_id);
+
+          // Idempotent: skip creation if snapshot already exists
+          try {
+            await new Promise((resolve, reject) => {
+              fs.access(
+                snapshot_path,
+                fs.constants.F_OK,
+                (err) => (err ? resolve() : reject(err))
+              );
+            });
+
+            // Already exists — return existing snapshot info
+            size_bytes = driver.getDirectoryUsage(snapshot_path);
+          } catch {
+            // Doesn't exist yet — fall through to create it
+          }
+
+          if (!size_bytes || size_bytes == 0) {
+            await driver.createDir(snapshot_path);
+
+            // Assert XFS on both source and snapshot paths via injected xfsClient
+            if (driver.xfsClient) {
+              await driver.xfsClient.assertXfs(volume_path);
+              await driver.xfsClient.assertXfs(snapshot_path);
+              await driver.xfsClient.assertSameFilesystem(
+                volume_path,
+                snapshot_path
+              );
+
+              // Reflink copy the directory tree (CoW per-file)
+              await driver.xfsClient.reflinkCopy(volume_path, snapshot_path);
+            } else {
+              throw new GrpcError(
+                grpc.status.FAILED_PRECONDITION,
+                "xfs-reflink requires xfsClient to be configured"
+              );
+            }
+
+            size_bytes = driver.getDirectoryUsage(snapshot_path);
+          }
+
+          // Encode snapshot_id with driver info (base64 JSON scheme)
+          const encoded_snapshot_id = encodeURIComponent(
+            Buffer.from(JSON.stringify({ snapshot_driver: "xfs-reflink", snapshot_id })).toString("base64")
+          );
+
+          this.snapshotsInProgress.add(snapshot_id);
+
+          return {
+            snapshot: {
+              size_bytes,
+              snapshot_id: `${snapshot_driver}&${encoded_snapshot_id}`,
+              source_volume_id: source_volume_id,
+              creation_time: {
+                seconds: Math.round(new Date().getTime() / 1000),
+                nanos: 0,
+              },
+              ready_to_use: true,
+            },
+          };
+        }
+
       default:
         throw new GrpcError(
           grpc.status.INVALID_ARGUMENT,
@@ -1277,6 +1412,7 @@ class ControllerClientCommonDriver extends CsiBaseDriver {
         );
     }
 
+    // Unified return for filecopy / restic / kopia (URLSearchParams format)
     return {
       snapshot: {
         /**
@@ -1377,6 +1513,12 @@ class ControllerClientCommonDriver extends CsiBaseDriver {
           const kopia = await driver.getKopiaClient();
           let options = [snapshot_id];
           await kopia.snapshotDelete(options);
+        }
+        break;
+      case "xfs-reflink":
+        {
+          const snapshot_path = driver.getControllerSnapshotPath(snapshot_id);
+          await driver.deleteDir(snapshot_path);
         }
         break;
       default:

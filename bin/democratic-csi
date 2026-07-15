@@ -177,6 +177,14 @@ try {
   process.exit(1);
 }
 
+// Generic post-factory startup assertion hook — any driver can implement this.
+// Wrapped in IIFE because CommonJS modules don't support top-level await.
+(async () => {
+  if (typeof driver.startupAssert === "function") {
+    try { await driver.startupAssert(); } catch (err) { logger.error(`${err.toString()}`); process.exit(1); }
+  }
+})();
+
 // TODO: consider alternatives that work 100% with replicas > 1
 // doing this in memory is crude and currently only works reliably with 1
 // replica per controller (due to potentional cross external-foo leaders,

@@ -62,6 +62,11 @@ function factory(ctx, options) {
       return new ControllerNfsClientDriver(ctx, options);
     case "local-hostpath":
       return new ControllerLocalHostpathDriver(ctx, options);
+    case "xfs-local-hostpath": {
+      ctx.logger.warn("WARNING: 'driver: xfs-local-hostpath' is deprecated. Use 'driver: local-hostpath' with 'local-hostpath.xfs.enabled: true' instead.");
+      options["local-hostpath"] = Object.assign({}, options["xfs-local-hostpath"], { xfs: Object.assign({ enabled: true }, options["xfs-local-hostpath"].xfs) });
+      return new ControllerLocalHostpathDriver(ctx, options);
+    }
     case "lustre-client":
       return new ControllerLustreClientDriver(ctx, options);
     case "objectivefs":
