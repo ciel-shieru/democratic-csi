@@ -369,20 +369,20 @@ jobs:
         env:
           TEMPLATE_CONFIG_FILE: "./ci/configs/${{ matrix.config }}"
 
-  # xfs-local-hostpath drivers
-  csi-sanity-xfs-local-hostpath:
+  # local-hostpath with XFS driver
+  csi-sanity-local-hostpath-xfs:
     needs:
       - build-npm-linux-amd64
     strategy:
       fail-fast: false
       matrix:
         config:
-          - xfs-local-hostpath/basic.yaml
+          - local-hostpath/xfs.yaml
     runs-on:
       - self-hosted
       - Linux
       - X64
-      - csi-sanity-xfs-local-hostpath
+      - csi-sanity-local-hostpath-xfs
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -500,7 +500,7 @@ jobs:
       - csi-sanity-client-windows
       - csi-sanity-zfs-local
       - csi-sanity-local-hostpath
-      - csi-sanity-xfs-local-hostpath
+      - csi-sanity-local-hostpath-xfs
       - csi-sanity-windows-node
     runs-on: ubuntu-latest
     steps:
@@ -543,7 +543,7 @@ jobs:
       - csi-sanity-client-windows
       - csi-sanity-zfs-local
       - csi-sanity-local-hostpath
-      - csi-sanity-xfs-local-hostpath
+      - csi-sanity-local-hostpath-xfs
       - csi-sanity-windows-node
     runs-on: ${{ matrix.os }}
     strategy:

@@ -147,15 +147,15 @@ enable/disable CHAP or change the password after the volume has been created.
 
 If the secret itself is referenced but not present, the volume will not be created.
 
-## `xfs-local-hostpath`
+### XFS support
 
-The `xfs-local-hostpath` driver creates directories on a local XFS filesystem
-and provides true CoW snapshots via XFS reflinks, as well as per-PVC project
-quota enforcement. It is intended for single-node clusters (e.g. Talos Linux)
-where the host filesystem is XFS and users want instant, space-efficient
-snapshots without standing up ZFS/Btrfs/Ceph.
+When running on an XFS filesystem with project quotas enabled, set
+`local-hostpath.xfs.enabled: true` to unlock instant CoW snapshots via reflinks
+and per-PVC storage limits. This is the recommended configuration for single-node
+clusters (e.g. Talos Linux) where the host filesystem is XFS and users want
+instant, space-efficient snapshots without standing up ZFS/Btrfs/Ceph.
 
-### Prerequisites
+#### Prerequisites
 
 - The backing path (`shareBasePath` / `controllerBasePath`) **must** be on an
   XFS filesystem.
@@ -167,37 +167,88 @@ snapshots without standing up ZFS/Btrfs/Ceph.
 - The driver pod requires elevated privileges (`CAP_SYS_ADMIN` or a privileged
   securityContext) on the controller side because `xfs_quota` needs them.
 
-### Configuration
+#### Configuration
 
 ```yaml
-driver: xfs-local-hostpath
+driver: local-hostpath
 instance_id:
-xfs-local-hostpath:
-  shareBasePath: "/var/lib/csi-xfs-local-hostpath"
-  controllerBasePath: "/var/lib/csi-xfs-local-hostpath"
+local-hostpath:
+  shareBasePath: "/var/lib/csi-local-hostpath"
+  controllerBasePath: "/var/lib/csi-local-hostpath"
   dirPermissionsMode: "0777"
   dirPermissionsUser: 0
   dirPermissionsGroup: 0
-  snapshots:
-    default_driver: xfs-reflink
+
+  xfs:
+    enabled: true
+
+    # XFS project quota ID range. Volumes get a deterministic project ID derived
+    # from their volume_id hashed into this range. Default is [1000000, 1999999].
+    # project_id_range: [1000000, 1999999]
+
+    snapshots:
+      default_driver: xfs-reflink
 ```
 
-### Capabilities
+#### Capabilities (with `xfs.enabled: true`)
 
 - `EXPAND_VOLUME` — online volume expansion by adjusting the XFS project quota.
 - `CREATE_DELETE_SNAPSHOT` — instant CoW snapshots via `cp --reflink=always`.
 - `CLONE_VOLUME` — instant volume cloning via reflink copy.
 - `GET_CAPACITY` — reports available capacity on the backing filesystem.
 
-### Snapshot driver: `xfs-reflink`
+#### Snapshot driver: `xfs-reflink`
 
-The `xfs-local-hostpath` driver only supports the `xfs-reflink` snapshot class.
+When XFS support is enabled, the only supported snapshot class is `xfs-reflink`.
 It uses `cp --archive --reflink=always` to create atomic, CoW clones of file
 data blocks. Snapshots are near-instant and initially consume ~0 extra space
-( extents are shared until written).
+(extents are shared until written).
 
 - Snapshots are local to one host; no off-host or cross-host dedup. Users who
   need off-host backup should use `local-hostpath` with restic/kopia instead.
 - Reflink `cp` is atomic per-file. For a quiescent PVC this produces a coherent
   snapshot; for an actively-written PVC the snapshot reflects per-file mtime
   ordering (same caveat as `filecopy`).
+
+#### Volume expansion workflow
+
+This driver enforces per-PVC storage limits via XFS project quotas
+(`xfs_quota(8)`). Expansion works by updating the quota on each node where a pod
+mounts the volume.
+
+**Prerequisites:**
+
+- The host filesystem must be mounted with `prjquota` in its mount options
+  (e.g. `/etc/fstab` line: `/dev/sdX /var xfs defaults,prjquota 0 2`).
+  Verify with: `findmnt -o OPTIONS --target <base-path> | grep prjquota`
+- The StorageClass MUST have `allowVolumeExpansion: true`.
+
+**User workflow (no external-resizer needed):**
+
+1. Patch or edit the PVC to request a larger storage size.
+
+   ```bash
+   kubectl patch pvc my-pvc -p '{"spec":{"resources":{"requests":{"storage":"50Gi"}}}}'
+   ```
+
+2. Restart (or recreate) any pods that use this PVC so kubelet calls
+   `NodeExpandVolume` on the node side, which updates the XFS project quota.
+
+   ```bash
+   kubectl delete pod <pod>        # or: kubectl rollout restart deployment/...
+   ```
+
+3. The PVC now reports the new capacity and the container sees the larger
+   filesystem-backed limit (writes beyond the old quota are no longer blocked).
+
+**Notes:**
+
+- XFS project quotas can be changed while the directory is in use — no need to
+  unmount or stop workloads. A pod restart ensures kubelet invokes
+  `NodeExpandVolume` and that the driver's sidecar file reflects the new size
+  for subsequent mounts (e.g. after a node reboot).
+- Because this driver is node-local by nature, `ControllerExpandVolume` is
+  deliberately not implemented: a controller-side RPC cannot reach the backing
+  directory on an arbitrary other node. kubelet's in-tree resize handler calls
+  `NodeExpandVolume` directly after the pod restarts with the resized PVC — no
+  external-resizer sidecar is required or expected.

@@ -1,25 +1,29 @@
-driver: xfs-local-hostpath
+driver: local-hostpath
 instance_id:
-xfs-local-hostpath:
+local-hostpath:
   # generally shareBasePath and controllerBasePath should be the same for this
   # driver, this path must be on an XFS filesystem (mounted with prjquota).
   # Talos Linux enables prjquota on /var by default. Other distros may need a
   # fstab/mount-option change.
-  shareBasePath: "/var/lib/csi-xfs-local-hostpath"
-  controllerBasePath: "/var/lib/csi-xfs-local-hostpath"
+  shareBasePath: "/var/lib/csi-local-hostpath"
+  controllerBasePath: "/var/lib/csi-local-hostpath"
   dirPermissionsMode: "0777"
   dirPermissionsUser: 0
   dirPermissionsGroup: 0
 
-  # XFS project quota ID range. Volumes get a deterministic project ID derived
-  # from their volume_id hashed into this range. Default is [1000000, 1999999].
-  # xfs.project_id_range: [1000000, 1999999]
+  # Enable XFS-specific features (project quotas, reflink snapshots).
+  xfs:
+    enabled: true
 
-  snapshots:
-    # xfs-local-hostpath only supports the xfs-reflink snapshot driver.
-    # The filecopy/restic/kopia snapshot drivers are not compatible because
-    # they do not provide atomic CoW semantics on XFS.
-    default_driver: xfs-reflink
+    # XFS project quota ID range. Volumes get a deterministic project ID derived
+    # from their volume_id hashed into this range. Default is [1000000, 1999999].
+    # project_id_range: [1000000, 1999999]
+
+    snapshots:
+      # When xfs.enabled is true the only supported snapshot driver is xfs-reflink.
+      # The filecopy/restic/kopia snapshot drivers are not compatible because
+      # they do not provide atomic CoW semantics on XFS.
+      default_driver: xfs-reflink
 
 # ============================================================================
 # Volume expansion (resize) — node-only, no ControllerExpandVolume
