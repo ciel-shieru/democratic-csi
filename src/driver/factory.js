@@ -3,6 +3,9 @@ const { FreeNASApiDriver } = require("./freenas/api");
 const {
   ControllerLocalHostpathDriver,
 } = require("./controller-local-hostpath");
+const {
+  ControllerXfsLocalHostpathDriver,
+} = require("./controller-xfs-local-hostpath");
 const { ControllerZfsGenericDriver } = require("./controller-zfs-generic");
 const { ControllerZfsLocalDriver } = require("./controller-zfs-local");
 const {
@@ -62,6 +65,8 @@ function factory(ctx, options) {
       return new ControllerNfsClientDriver(ctx, options);
     case "local-hostpath":
       return new ControllerLocalHostpathDriver(ctx, options);
+    case "xfs-local-hostpath":
+      return new ControllerXfsLocalHostpathDriver(ctx, options);
     case "lustre-client":
       return new ControllerLustreClientDriver(ctx, options);
     case "objectivefs":
